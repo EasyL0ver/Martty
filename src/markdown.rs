@@ -125,8 +125,10 @@ pub fn render(text: &str, theme: &Theme, tone: ToneMode, width: usize) -> Vec<Li
                         text: raw.to_string(), style: DeepSeekStyleSheet(*theme).code(),
                     }], inner);
                     if rows.is_empty() { rows.push(Line::default()); }
-                    for row in rows {
-                        out.push(with_prefix(&code_prefix, code_frame_row(row, inner, theme)));
+                    let count = rows.len();
+                    for (k, row) in rows.into_iter().enumerate() {
+                        let wraps = k + 1 < count;
+                        out.push(with_prefix(&code_prefix, code_frame_row(row, inner, wraps, theme)));
                     }
                 }
                 in_code = true;
@@ -1066,9 +1068,14 @@ fn code_frame_bottom(width: usize, theme: &Theme) -> Line<'static> {
     ])
 }
 
+/// Right edge of a code row whose code line continues on the next row
+/// (golem): copying joins the two rows back into one line.
+pub const CODE_WRAP_EDGE: &str = "┆";
+
 /// One content row inside the frame: `│ ` + padded content + ` │`, the
 /// padding painted with the panel background so the row is a full rectangle.
-fn code_frame_row(line: Line<'static>, inner: usize, theme: &Theme) -> Line<'static> {
+/// A row cut by wrapping ends in [`CODE_WRAP_EDGE`] instead of `│`.
+fn code_frame_row(line: Line<'static>, inner: usize, wraps: bool, theme: &Theme) -> Line<'static> {
     let border = Style::default().fg(theme.border);
     let fill = Style::default().bg(theme.panel);
     let w: usize = line.spans.iter().map(|s| s.content.width()).sum();
@@ -1078,8 +1085,109 @@ fn code_frame_row(line: Line<'static>, inner: usize, theme: &Theme) -> Line<'sta
     ];
     spans.extend(line.spans);
     spans.push(Span::styled(" ".repeat(inner.saturating_sub(w) + 1), fill));
-    spans.push(Span::styled("│".to_string(), border));
+    spans.push(Span::styled(if wraps { CODE_WRAP_EDGE } else { "│" }.to_string(), border));
     Line::from(spans)
+}
+
+/// golem: what a rendered line of a fenced code block is, for copying
+/// (frames and padding are never copied; wrapped rows join back).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CodeLine {
+    /// The top frame edge (`┌─ lang ─┐`).
+    Top,
+    /// The bottom frame edge (`└───┘`).
+    Bottom,
+    /// A content row: the code sits in display columns `start..end` (as
+    /// counted by the selection copy); `wraps`: its code line continues on
+    /// the next row.
+    Row { start: usize, end: usize, wraps: bool },
+}
+
+/// Display cells of `s` as the selection copy counts them.
+fn copy_cells(s: &str) -> usize {
+    s.chars()
+        .map(|c| unicode_width::UnicodeWidthChar::width(c).unwrap_or(0).max(1))
+        .sum()
+}
+
+/// Recognize a code block line as [`code_frame_top`], [`code_frame_bottom`]
+/// and [`code_frame_row`] build it, after any quote/list prefix spans.
+pub fn code_line(line: &Line) -> Option<CodeLine> {
+    let spans = &line.spans;
+    let text = |i: usize| spans.get(i).map(|s| s.content.as_ref());
+    let is_rule = |i: usize| text(i).is_some_and(|t| !t.is_empty() && t.chars().all(|c| c == '─'));
+    let n = spans.len();
+    if n >= 3 && text(n - 1) == Some("┘") && text(n - 3) == Some("└") && is_rule(n - 2) {
+        return Some(CodeLine::Bottom);
+    }
+    if n >= 4 && text(n - 1) == Some("┐") && text(n - 4) == Some("┌") && is_rule(n - 2) {
+        return Some(CodeLine::Top);
+    }
+    let last = text(n.checked_sub(1)?)?;
+    if last != "│" && last != CODE_WRAP_EDGE {
+        return None;
+    }
+    let fill = |i: usize| {
+        spans.get(i).filter(|s| {
+            s.style.bg.is_some()
+                && s.style.fg.is_none()
+                && !s.content.is_empty()
+                && s.content.chars().all(|c| c == ' ')
+        })
+    };
+    let pad = fill(n.checked_sub(2)?)?;
+    let open = (0..n.saturating_sub(3)).find(|&i| {
+        text(i) == Some("│") && fill(i + 1).is_some_and(|g| g.content == " " && g.style == pad.style)
+    })?;
+    let start = spans[..open + 2].iter().map(|s| copy_cells(&s.content)).sum::<usize>();
+    let width = spans[open + 2..n - 2].iter().map(|s| copy_cells(&s.content)).sum::<usize>();
+    Some(CodeLine::Row { start, end: start + width, wraps: last == CODE_WRAP_EDGE })
+}
+
+/// The code of the block whose top or bottom edge is `lines[edge]`, rows
+/// joined back into the original lines. `None` when `edge` is not an edge
+/// or the block is cut off.
+pub fn code_block_text(lines: &[Line], edge: usize) -> Option<String> {
+    let is_row = |i: usize| matches!(code_line(&lines[i]), Some(CodeLine::Row { .. }));
+    let rows = match code_line(lines.get(edge)?)? {
+        CodeLine::Top => {
+            let end = (edge + 1..lines.len()).find(|&i| !is_row(i))?;
+            (code_line(&lines[end]) == Some(CodeLine::Bottom)).then_some(edge + 1..end)?
+        }
+        CodeLine::Bottom => {
+            let begin = (0..edge).rev().find(|&i| !is_row(i))?;
+            (code_line(&lines[begin]) == Some(CodeLine::Top)).then_some(begin + 1..edge)?
+        }
+        CodeLine::Row { .. } => return None,
+    };
+    let mut out = String::new();
+    for i in rows {
+        let Some(CodeLine::Row { start, end, wraps }) = code_line(&lines[i]) else {
+            return None;
+        };
+        let text: String = lines[i].spans.iter().map(|s| s.content.as_ref()).collect();
+        out.push_str(&slice_cells(&text, start, end));
+        if !wraps {
+            out.push('\n');
+        }
+    }
+    if out.ends_with('\n') {
+        out.pop();
+    }
+    Some(out)
+}
+/// The chars of `s` in copy cells `c0..c1` (see [`copy_cells`]).
+fn slice_cells(s: &str, c0: usize, c1: usize) -> String {
+    let mut out = String::new();
+    let mut w = 0usize;
+    for ch in s.chars() {
+        let cw = copy_cells(ch.encode_utf8(&mut [0; 4]));
+        if w >= c0 && w + cw <= c1 {
+            out.push(ch);
+        }
+        w += cw;
+    }
+    out
 }
 
 /// Hard-wrap preformatted text, preserving every character — including

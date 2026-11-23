@@ -2498,6 +2498,17 @@ fn draw_chat(f: &mut Frame, app: &mut App, area: Rect) {
         .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
         .collect();
     app.chat_view.owners = owners[start..end].to_vec();
+    app.chat_view.code = lines[start..end].iter().map(crate::markdown::code_line).collect();
+    app.chat_view.code_blocks = app
+        .chat_view
+        .code
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| {
+            matches!(c, Some(crate::markdown::CodeLine::Top | crate::markdown::CodeLine::Bottom))
+        })
+        .filter_map(|(i, _)| Some((start + i, crate::markdown::code_block_text(&lines, start + i)?)))
+        .collect();
     // The ↥ jump flash (issue #103): resolve the flashing transcript cell
     // to its current line span every frame — streaming can move the prompt
     // — and drop it once the 5 s window expired.

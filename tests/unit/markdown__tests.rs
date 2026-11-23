@@ -780,3 +780,48 @@ fn emoji_variation_selectors_are_stripped_in_prose_code_and_blockquote() {
         assert!(text.contains('\u{26a0}'), "base glyph dropped for {md:?}: {text:?}");
     }
 }
+
+// golem: copying code blocks without their frames.
+
+fn code_kinds(lines: &[Line]) -> Vec<Option<CodeLine>> {
+    lines.iter().map(code_line).collect()
+}
+
+#[test]
+fn code_lines_are_recognized_and_prose_is_not() {
+    let lines = render_dark("text\n\n```rust\nfn a() {}\n\n  b();\n```\n\n| x | y |\n|---|---|\n| 1 | 2 |", 40);
+    let kinds = code_kinds(&lines);
+    let top = kinds.iter().position(|k| *k == Some(CodeLine::Top)).expect("top edge");
+    let bottom = kinds.iter().position(|k| *k == Some(CodeLine::Bottom)).expect("bottom edge");
+    assert_eq!(bottom, top + 4, "three rows between the edges: {kinds:?}");
+    for k in &kinds[top + 1..bottom] {
+        assert!(matches!(k, Some(CodeLine::Row { start: 2, wraps: false, .. })), "{k:?}");
+    }
+    // Prose and table lines are no code lines.
+    assert_eq!(kinds[0], None);
+    assert!(kinds[bottom + 1..].iter().all(Option::is_none), "{kinds:?}");
+    assert_eq!(code_block_text(&lines, top).as_deref(), Some("fn a() {}\n\n  b();"));
+    assert_eq!(code_block_text(&lines, bottom).as_deref(), Some("fn a() {}\n\n  b();"));
+    assert_eq!(code_block_text(&lines, 0), None);
+}
+
+#[test]
+fn wrapped_code_rows_join_back_into_one_line() {
+    let long = "let value = compute(alpha, beta, gamma, delta);";
+    let lines = render_dark(&format!("```\n{long}\nnext\n```"), 24);
+    let kinds = code_kinds(&lines);
+    let rows: Vec<_> = kinds.iter().flatten().filter(|k| matches!(k, CodeLine::Row { .. })).collect();
+    assert!(rows.len() > 2, "wrapped: {kinds:?}");
+    assert!(matches!(rows[0], CodeLine::Row { wraps: true, .. }));
+    assert!(matches!(rows[rows.len() - 1], CodeLine::Row { wraps: false, .. }));
+    let wrapped = lines.iter().find(|l| matches!(code_line(l), Some(CodeLine::Row { wraps: true, .. }))).unwrap();
+    assert_eq!(wrapped.spans.last().unwrap().content, CODE_WRAP_EDGE);
+    assert_eq!(code_block_text(&lines, 0).as_deref(), Some(format!("{long}\nnext").as_str()));
+}
+
+#[test]
+fn quoted_code_block_copies_without_the_quote_prefix() {
+    let lines = render_dark("> ```\n> x = 1\n> ```", 30);
+    let top = code_kinds(&lines).iter().position(|k| *k == Some(CodeLine::Top)).expect("top");
+    assert_eq!(code_block_text(&lines, top).as_deref(), Some("x = 1"));
+}

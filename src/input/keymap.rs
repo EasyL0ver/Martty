@@ -974,7 +974,7 @@ pub const MOUSE_ROWS: &[MouseRow] = &[
     },
     MouseRow {
         chords: &["click"],
-        desc_en: "expand/collapse a tool · wheel scrolls",
+        desc_en: "expand/collapse a tool · a code block's top/bottom edge copies its code · wheel scrolls",
         desc_zh: "点击展开/折叠工具 · 滚轮滚动",
     },
     MouseRow {

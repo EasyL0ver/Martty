@@ -552,6 +552,12 @@ pub struct ChatView {
     pub total: usize,
     /// Visible image thumbnails, filled by `ui::draw_chat` every frame.
     pub images: Vec<ThumbPlacement>,
+    /// golem: per snapshot line, its part in a fenced code block, so a copy
+    /// leaves out frames and padding and joins wrapped rows.
+    pub code: Vec<Option<crate::markdown::CodeLine>>,
+    /// golem: code blocks with a frame edge in the snapshot, as (absolute
+    /// edge line, the block's code). Clicking an edge copies the block.
+    pub code_blocks: Vec<(usize, String)>,
 }
 
 impl ChatView {
@@ -565,6 +571,14 @@ impl ChatView {
     /// the viewport or for lines no tool cell owns.
     pub fn line_owner(&self, line: usize) -> Option<usize> {
         self.owners.get(line.checked_sub(self.top)?).copied().flatten()
+    }
+
+    /// The code block whose frame edge is the absolute layout `line`.
+    pub fn code_block_at(&self, line: usize) -> Option<&str> {
+        self.code_blocks
+            .iter()
+            .find(|(edge, _)| *edge == line)
+            .map(|(_, text)| text.as_str())
     }
 }
 
@@ -5170,20 +5184,6 @@ impl App {
         }
     }
 
-    /// Cancel compositor-owned modals before a session switch, mirroring
-    /// the Esc paths of `handle_view_key` / `handle_select_key` /
-    /// `handle_slider_key` so the plugin releases its single-overlay slot
-    /// (its `current` clears and future overlay opens work again).
-    /// Painter-owned views (`notify_plugin == false`, i.e. `/help`, `/keys`,
-    /// `/session`, painter `/status`) are left alone — they park with their
-    /// session inside the switch and resurface on return.
-    fn cancel_plugin_overlays(&mut self, ctl: &Controller) {
-        if let Some(view) = self.view_overlay.take() {
-            if view.notify_plugin {
-                ctl.send(Cmd::PluginOverlayEvent {
-                    id: view.id,
-                    event: "cancel".into(),
-                    value: None,
     /// Insert pasted text into the composer.
     fn paste_into_composer(&mut self, text: &str) {
         self.slash_completion_dismissed = false;
@@ -5199,6 +5199,20 @@ impl App {
         self.needs_redraw = true;
     }
 
+    /// Cancel compositor-owned modals before a session switch, mirroring
+    /// the Esc paths of `handle_view_key` / `handle_select_key` /
+    /// `handle_slider_key` so the plugin releases its single-overlay slot
+    /// (its `current` clears and future overlay opens work again).
+    /// Painter-owned views (`notify_plugin == false`, i.e. `/help`, `/keys`,
+    /// `/session`, painter `/status`) are left alone — they park with their
+    /// session inside the switch and resurface on return.
+    fn cancel_plugin_overlays(&mut self, ctl: &Controller) {
+        if let Some(view) = self.view_overlay.take() {
+            if view.notify_plugin {
+                ctl.send(Cmd::PluginOverlayEvent {
+                    id: view.id,
+                    event: "cancel".into(),
+                    value: None,
                 });
             } else {
                 self.view_overlay = Some(view);
@@ -5821,6 +5835,12 @@ impl App {
         let Some(sel) = self.sel else { return };
         if sel.is_caret() {
             self.sel = None;
+            // golem: a click on a code block's frame edge copies the block.
+            if let Some(code) = self.chat_view.code_block_at(sel.anchor.line).map(str::to_string) {
+                if !code.trim().is_empty() {
+                    self.copy_text(&code);
+                }
+            }
             return;
         }
         let text = self.selection_text(sel);
@@ -5943,11 +5963,35 @@ impl App {
         if first > last {
             return String::new(); // starts below the captured viewport
         }
-        let mut out = Vec::with_capacity(last - first + 1);
+        let mut out: Vec<String> = Vec::with_capacity(last - first + 1);
+        // golem: code block frames and padding are left out, and a code
+        // line wrapped over several rows is copied as one line.
+        let mut join = false;
         for (li, text) in lines.iter().enumerate().take(last + 1).skip(first) {
             let c0 = if li + top == s.line { s.col } else { 0 };
             let c1 = if li + top == e.line { e.col + 1 } else { usize::MAX };
-            out.push(slice_by_cells(text, c0, c1).trim_end().to_string());
+            match self.chat_view.code.get(li).copied().flatten() {
+                Some(crate::markdown::CodeLine::Top | crate::markdown::CodeLine::Bottom) => {
+                    join = false;
+                }
+                Some(crate::markdown::CodeLine::Row { start, end, wraps }) => {
+                    let piece = if c0.max(start) < c1.min(end) {
+                        slice_by_cells(text, c0.max(start), c1.min(end))
+                    } else {
+                        String::new()
+                    };
+                    let piece = if wraps { piece } else { piece.trim_end().to_string() };
+                    match out.last_mut() {
+                        Some(prev) if join => prev.push_str(&piece),
+                        _ => out.push(piece),
+                    }
+                    join = wraps;
+                }
+                None => {
+                    out.push(slice_by_cells(text, c0, c1).trim_end().to_string());
+                    join = false;
+                }
+            }
         }
         out.join("\n")
     }
@@ -10272,7 +10316,27 @@ impl App {
     }
 
     /// `/clip [caption]` — stage the clipboard image in the composer.
+    /// golem: on Windows, ctrl+v (empty caption) pastes clipboard text
+    /// when there is no picture: console terminals deliver neither
+    /// images nor bracketed pastes to the app.
     fn clip_image(&mut self, caption: &str, _ctl: &Controller) {
+        #[cfg(windows)]
+        if caption.is_empty() {
+            if let Some(png) = crate::winclip::read_image_png() {
+                self.stage_image(
+                    "clipboard.png".into(),
+                    "clipboard".into(),
+                    "image/png".into(),
+                    png,
+                    String::new(),
+                );
+            } else if let Some(text) = crate::winclip::read_text().filter(|t| !t.is_empty()) {
+                self.paste_into_composer(&text);
+            } else {
+                self.show_tip(self.locale.tr("clipboard is empty", "剪贴板为空"));
+            }
+            return;
+        }
         match read_clipboard_image() {
             Some((bytes, media_type)) => self.stage_image(
                 "clipboard.png".into(),
@@ -10316,27 +10380,7 @@ impl App {
             self.input.set(caption);
             self.input.insert_char(' ');
         } else if self.input.cursor_char() > 0
-    /// golem: on Windows, ctrl+v (empty caption) pastes clipboard text
-    /// when there is no picture: console terminals deliver neither
-    /// images nor bracketed pastes to the app.
             && !self
-        #[cfg(windows)]
-        if caption.is_empty() {
-            if let Some(png) = crate::winclip::read_image_png() {
-                self.stage_image(
-                    "clipboard.png".into(),
-                    "clipboard".into(),
-                    "image/png".into(),
-                    png,
-                    String::new(),
-                );
-            } else if let Some(text) = crate::winclip::read_text().filter(|t| !t.is_empty()) {
-                self.paste_into_composer(&text);
-            } else {
-                self.show_tip(self.locale.tr("clipboard is empty", "剪贴板为空"));
-            }
-            return;
-        }
                 .input
                 .buf()
                 .chars()

@@ -23,6 +23,8 @@ fn view(lines: &[&str]) -> ChatView {
         owners: vec![None; lines.len()],
         total: lines.len(),
         images: Vec::new(),
+        code: Vec::new(),
+        code_blocks: Vec::new(),
     }
 }
 
@@ -453,4 +455,52 @@ fn selection_text_extracts_the_visible_part_of_a_scrolled_selection() {
 
     let text = app.selection_text(sel((1, 2), (3, 4)));
     assert_eq!(text, "two\nthree");
+}
+
+/// golem: a chat view showing rendered markdown, with the code-line roles
+/// `ui::draw_chat` records.
+fn markdown_view(md: &str, width: usize) -> ChatView {
+    let lines = crate::markdown::render(md, &crate::theme::Theme::dark(), crate::markdown::ToneMode::Single, width);
+    let mut v = view(&[]);
+    v.lines = lines.iter().map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect()).collect();
+    v.owners = vec![None; lines.len()];
+    v.total = lines.len();
+    v.code = lines.iter().map(crate::markdown::code_line).collect();
+    v.code_blocks = v
+        .code
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| matches!(c, Some(crate::markdown::CodeLine::Top | crate::markdown::CodeLine::Bottom)))
+        .filter_map(|(i, _)| Some((i, crate::markdown::code_block_text(&lines, i)?)))
+        .collect();
+    v
+}
+
+#[test]
+fn selection_over_a_code_block_copies_the_code_without_frames() {
+    let mut app = test_app();
+    let long = "let value = compute(alpha, beta, gamma);";
+    app.chat_view = markdown_view(&format!("intro\n\n```rust\nfn main() {{\n    {long}\n}}\n```\n\nafter"), 30);
+    let last = app.chat_view.lines.len() - 1;
+    let text = app.selection_text(sel((0, 0), (last, 60)));
+    assert_eq!(text, format!("intro\n\nfn main() {{\n    {long}\n}}\n\nafter"));
+}
+
+#[test]
+fn partial_selection_inside_a_code_row_copies_only_code() {
+    let mut app = test_app();
+    app.chat_view = markdown_view("```\nalpha beta\n```", 30);
+    // Row 1 is `│ alpha beta …│`: code starts at cell 2.
+    assert_eq!(app.selection_text(sel((1, 0), (1, 29))), "alpha beta");
+    assert_eq!(app.selection_text(sel((1, 8), (1, 11))), "beta");
+}
+
+#[test]
+fn clicking_a_code_block_edge_finds_the_block() {
+    let mut app = test_app();
+    app.chat_view = markdown_view("text\n\n```\none\ntwo\n```", 30);
+    let top = app.chat_view.code.iter().position(|c| *c == Some(crate::markdown::CodeLine::Top)).unwrap();
+    assert_eq!(app.chat_view.code_block_at(top), Some("one\ntwo"));
+    assert_eq!(app.chat_view.code_block_at(top + 3), Some("one\ntwo"));
+    assert_eq!(app.chat_view.code_block_at(0), None);
 }
