@@ -1060,7 +1060,8 @@ impl Transcript {
                 self.cells
                     .push(Cell::new(CellKind::Injected { source, preview }));
             }
-            UiEvent::UserMessage { text, .. } => {
+            UiEvent::UserMessage { session, text } => {
+                self.close_open(&session);
                 self.push_user(text, false);
             }
             UiEvent::SessionTitle { title, .. } => {

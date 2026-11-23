@@ -5,6 +5,10 @@ All notable changes to this project are documented here. The project follows
 
 ## [Unreleased]
 
+### Fixed
+
+- Keep assistant replies in chronological order when replaying ACP history without message-final metadata.
+
 ## [0.3.3] - 2026-10-17
 
 ### Compatibility

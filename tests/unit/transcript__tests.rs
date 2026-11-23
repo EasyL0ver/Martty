@@ -25,6 +25,36 @@ fn cancel_open_work_stops_running_tools() {
 }
 
 #[test]
+fn replay_keeps_assistant_replies_between_their_user_messages() {
+    let mut tr = t("s");
+    for (question, answer) in [("first question", "first answer"), ("second question", "second answer")] {
+        tr.apply(UiEvent::UserMessage {
+            session: "s".into(),
+            text: question.into(),
+        });
+        tr.apply(UiEvent::TextDelta {
+            session: "s".into(),
+            text: answer.into(),
+        });
+    }
+    assert_eq!(tr.cells.len(), 4);
+    for (index, expected) in [(0, "first question"), (2, "second question")] {
+        assert!(matches!(&tr.cells[index].kind, CellKind::User { text, .. } if text == expected));
+    }
+    for (index, expected) in [(1, "first answer"), (3, "second answer")] {
+        assert!(matches!(&tr.cells[index].kind, CellKind::Assistant { text, .. } if text == expected));
+    }
+    let rendered = tr
+        .lines(&Theme::dark(), crate::markdown::ToneMode::Single, 80, ' ')
+        .iter()
+        .flat_map(|line| line.spans.iter().map(|span| span.content.as_ref()))
+        .collect::<String>();
+    let positions = ["first question", "first answer", "second question", "second answer"]
+        .map(|text| rendered.find(text).expect("replayed message must be visible"));
+    assert!(positions.windows(2).all(|pair| pair[0] < pair[1]), "{rendered}");
+}
+
+#[test]
 fn streaming_text_appends_and_finalizes() {
     let mut tr = t("s");
     tr.apply(UiEvent::TurnStart {
