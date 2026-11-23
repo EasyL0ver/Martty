@@ -835,49 +835,18 @@ async fn run_control(
         }
         Cmd::ResumeSession { session_id: id } => {
             let sid = SessionId::new(id.clone());
-            let restored = if resume_session {
-                match cx
-                    .send_request(resume_session_request(
-                        sid.clone(),
-                        &cwd,
-                        additional_directories,
-                        &directories,
-                    ))
-                    .block_task_setup_deadline()
-                    .await
-                {
-                    Ok(resumed) => Ok((serde_json::to_value(resumed).unwrap_or(Value::Null), true)),
-                    Err(err) if load_session && !is_auth_required_error(&err) => cx
-                        .send_request(load_session_request(
-                            sid.clone(),
-                            &cwd,
-                            additional_directories,
-                            &directories,
-                        ))
-                        .block_task_setup_deadline()
-                        .await
-                        .map(|loaded| (serde_json::to_value(loaded).unwrap_or(Value::Null), false)),
-                    Err(err) => Err(err),
-                }
-            } else {
-                cx.send_request(load_session_request(
-                    sid.clone(),
-                    &cwd,
-                    additional_directories,
-                    &directories,
-                ))
-                    .block_task_setup_deadline()
-                    .await
-                    .map(|loaded| (serde_json::to_value(loaded).unwrap_or(Value::Null), false))
-            };
-            let result = restored.map(|(setup, resumed)| {
-                let notice = if resumed {
-                    format!("⟲ resumed {id} — previous transcript was not replayed")
-                } else {
-                    format!("⟲ loaded {id} — transcript from session/update")
-                };
-                (sid, setup, Some(notice))
-            });
+            let restored = restore_session(
+                &cx,
+                sid.clone(),
+                &cwd,
+                load_session,
+                resume_session,
+                additional_directories,
+                &directories,
+            )
+            .await;
+            let result = restored
+                .map(|(setup, resumed)| (sid, setup, Some(restore_notice(&id, resumed))));
             let _ = done.send(ControlFinish::Setup { result, requester: None });
         }
         Cmd::QueueSnapshot { snapshot } => {

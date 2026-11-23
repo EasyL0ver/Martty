@@ -479,7 +479,7 @@ fn main() -> Result<()> {
         } else {
             acp::AcpEndpoint::Spawn(agent_argv(&args))
         };
-        Controller::start_acp(cfg.clone(), endpoint, bus_tx.clone())
+        Controller::start_acp(cfg.clone(), endpoint, bus_tx.clone(), args.session_id.clone())
     };
     let theme = args.theme.as_deref().map(ui::theme_for);
     let mut app = App::new(
@@ -490,6 +490,11 @@ fn main() -> Result<()> {
         args.attach_fds || args.attach_tcp.is_some() || !args.demo,
         bus_tx.clone(),
     );
+    // `--session-id` reopens an existing ACP session whose history replays
+    // into this tab; the welcome banner would paint over it.
+    if !args.demo && args.session_id.is_some() {
+        app.show_banner = false;
+    }
     // The composer pet: real pixels (kitty graphics) where the terminal can,
     // half-block art (drawn by ui) where it can't.
     app.pet_pixels = pet::kitty_supported();

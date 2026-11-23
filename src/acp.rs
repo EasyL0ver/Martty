@@ -254,6 +254,7 @@ pub fn run_blocking(
     endpoint: AcpEndpoint,
     bus: Sender<AppEvent>,
     cmd_rx: Receiver<Cmd>,
+    startup_session: Option<String>,
 ) {
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -267,7 +268,7 @@ pub fn run_blocking(
             return;
         }
     };
-    if let Err(err) = runtime.block_on(run(cfg, endpoint, bus.clone(), cmd_rx)) {
+    if let Err(err) = runtime.block_on(run(cfg, endpoint, bus.clone(), cmd_rx, startup_session)) {
         // The painter retains the latest initialized identity, not cfg.bin from a previous Harness.
         let _ = bus.send(AppEvent::Ctl(CtlEvent::ConnectionFailed { target: String::new(), error: format!("{err:#}") }));
     }
@@ -1282,6 +1283,91 @@ async fn create_prompt_session(
     }
 }
 
+/// Startup counterpart of `create_prompt_session` for `--session-id`:
+/// reopen the named session through `session/resume` or `session/load`.
+/// Never falls back to `session/new` — a missing capability or a failed
+/// restore surfaces as an error instead of a silently fresh session.
+async fn restore_prompt_session(
+    cx: &ConnectionTo<Agent>,
+    id: &str,
+    cwd: &std::path::Path,
+    surface: &Arc<Mutex<Surface>>,
+    bus: &Sender<AppEvent>,
+    methods: &[AuthMethodInfo],
+    selected: Option<&AuthMethodInfo>,
+    provider: Option<&str>,
+    caps: (bool, bool),
+    additional_directories: bool,
+    directories: &[String],
+) -> std::result::Result<Option<SessionId>, AcpError> {
+    let (load_session, resume_session) = caps;
+    if !load_session && !resume_session {
+        return Err(AcpError::new(
+            -32601,
+            "agent supports neither session/resume nor session/load",
+        ));
+    }
+    let sid = SessionId::new(id.to_string());
+    match restore_session(
+        cx,
+        sid.clone(),
+        cwd,
+        load_session,
+        resume_session,
+        additional_directories,
+        directories,
+    )
+    .await
+    {
+        Ok((setup, resumed)) => {
+            emit_session_bound(bus, &sid, Some(restore_notice(id, resumed)));
+            apply_setup(&setup, Some(id), surface, bus);
+            if !methods.is_empty() {
+                emit_auth(bus, configured_snapshot(methods.to_vec(), selected));
+            }
+            Ok(Some(sid))
+        }
+        Err(err) if is_auth_required_error(&err) => {
+            emit_needs_auth_open(bus, methods.to_vec(), provider, Some(acp_error_message(&err)));
+            Ok(None)
+        }
+        Err(err) => Err(err),
+    }
+}
+
+/// Open the connection's first session: the `--session-id` target while
+/// one is pending, otherwise a fresh `session/new`.
+async fn open_prompt_session(
+    cx: &ConnectionTo<Agent>,
+    startup_session: Option<&str>,
+    cwd: &std::path::Path,
+    surface: &Arc<Mutex<Surface>>,
+    bus: &Sender<AppEvent>,
+    methods: &[AuthMethodInfo],
+    selected: Option<&AuthMethodInfo>,
+    provider: Option<&str>,
+    caps: (bool, bool),
+    additional_directories: bool,
+    directories: &[String],
+) -> std::result::Result<Option<SessionId>, AcpError> {
+    match startup_session {
+        Some(id) => {
+            restore_prompt_session(
+                cx, id, cwd, surface, bus, methods, selected, provider, caps,
+                additional_directories, directories,
+            )
+            .await
+        }
+        None => {
+            create_prompt_session(
+                cx, cwd, surface, bus, methods, selected, provider,
+                additional_directories, directories,
+            )
+            .await
+        }
+    }
+}
+
 fn session_connection_snapshot(value: &Value) -> crate::bus::SessionConnection {
     let mut argv = value.get("command").and_then(Value::as_str)
         .map(|command| vec![command.to_string()]).unwrap_or_default();
@@ -1545,6 +1631,44 @@ fn resume_session_request(
     request
 }
 
+/// Reopen an existing session: `session/resume` when advertised (falling
+/// back to `session/load` on a non-auth failure), else `session/load`.
+/// Returns the setup snapshot and whether the session was resumed (no
+/// transcript replay) rather than loaded.
+async fn restore_session(
+    cx: &ConnectionTo<Agent>,
+    sid: SessionId,
+    cwd: &std::path::Path,
+    load_session: bool,
+    resume_session: bool,
+    additional_directories: bool,
+    directories: &[String],
+) -> std::result::Result<(Value, bool), AcpError> {
+    if resume_session {
+        match cx
+            .send_request(resume_session_request(sid.clone(), cwd, additional_directories, directories))
+            .block_task_setup_deadline()
+            .await
+        {
+            Ok(resumed) => return Ok((serde_json::to_value(resumed).unwrap_or(Value::Null), true)),
+            Err(err) if !load_session || is_auth_required_error(&err) => return Err(err),
+            Err(_) => {}
+        }
+    }
+    cx.send_request(load_session_request(sid, cwd, additional_directories, directories))
+        .block_task_setup_deadline()
+        .await
+        .map(|loaded| (serde_json::to_value(loaded).unwrap_or(Value::Null), false))
+}
+
+fn restore_notice(id: &str, resumed: bool) -> String {
+    if resumed {
+        format!("⟲ resumed {id} — previous transcript was not replayed")
+    } else {
+        format!("⟲ loaded {id} — transcript from session/update")
+    }
+}
+
 fn prompt_image_supported(init: &Value) -> bool {
     let caps = init
         .get("agentCapabilities")
@@ -1707,6 +1831,9 @@ struct ConnectCarry {
     /// binds, credits this method instead of advertising "sign-in needed"
     /// for the first advertised one (issue #160).
     terminal_method: Option<String>,
+    /// `--session-id`: reopen this existing session instead of creating a
+    /// new one while no session is bound yet.
+    startup_session: Option<String>,
 }
 
 impl ConnectCarry {
@@ -1717,7 +1844,13 @@ impl ConnectCarry {
             parked: VecDeque::new(),
             session_auth_pending: false,
             terminal_method: None,
+            startup_session: None,
         }
+    }
+
+    fn with_startup_session(mut self, id: Option<String>) -> Self {
+        self.startup_session = id;
+        self
     }
 }
 
@@ -1778,17 +1911,19 @@ async fn run(
     endpoint: AcpEndpoint,
     bus: Sender<AppEvent>,
     cmd_rx: Receiver<Cmd>,
+    startup_session: Option<String>,
 ) -> Result<()> {
     // UI → ACP forwarding lives one level above `connect` so the channel
     // survives agent respawns (terminal sign-in drops the transport).
     let fwd_rx = spawn_cmd_bridge(cmd_rx);
+    let carry = ConnectCarry::new(fwd_rx).with_startup_session(startup_session);
     match endpoint {
         AcpEndpoint::Spawn(args) => {
             spawn_agent_loop(
                 move || AcpAgent::from_args(args.clone()),
                 cfg,
                 bus,
-                ConnectCarry::new(fwd_rx),
+                carry,
             )
             .await
         }
@@ -1800,7 +1935,7 @@ async fn run(
                 ByteStreams::new(outgoing, incoming),
                 cfg,
                 bus,
-                ConnectCarry::new(fwd_rx),
+                carry,
                 false,
             )
             .await
@@ -1821,7 +1956,7 @@ async fn run(
                 ByteStreams::new(write.compat_write(), read.compat()),
                 cfg,
                 bus,
-                ConnectCarry::new(fwd_rx),
+                carry,
                 false,
             )
             .await
@@ -2732,6 +2867,7 @@ where
                     mut parked,
                     mut session_auth_pending,
                     terminal_method,
+                    mut startup_session,
                 } = carry;
                 let _ = bus.send(AppEvent::Ctl(CtlEvent::Starting {
                     runtime: "acp".into(),
@@ -2890,20 +3026,23 @@ where
                 // `pending` / `parked` / `session_auth_pending` came in via
                 // `ConnectCarry` and survive a transport respawn.
                 let mut setup_failed = false;
-                                match create_prompt_session(
+                                match open_prompt_session(
                     &cx,
+                    startup_session.as_deref(),
                     &cwd,
                     &surface,
                     &bus,
                     &methods,
                     selected.as_ref(),
                     None,
+                    (load_session, resume_session),
                     additional_directories,
                     &cfg.additional_directories,
                 )
                 .await
                 {
                     Ok(Some(sid)) => {
+                        startup_session = None;
                         let owner = sid.0.clone();
                         bind_session(&mut sessions, &mut current, &mut pending, sid);
                         // A respawned connection (Terminal Auth reconnect)
@@ -2920,8 +3059,12 @@ where
                     }
                     Err(err) => {
                         setup_failed = true;
+                        let method = match startup_session.as_deref() {
+                            Some(id) => format!("restore {id}"),
+                            None => "session/new".to_string(),
+                        };
                         let _ = bus.send(AppEvent::Ctl(CtlEvent::ConnectionFailed {
-                            target: agent_name.clone(), error: format!("session/new: {}", acp_error_message(&err))
+                            target: agent_name.clone(), error: format!("{method}: {}", acp_error_message(&err))
                         }));
                     }
                 }
@@ -2996,20 +3139,23 @@ where
                                         )));
                                         continue;
                                     }
-                                                                        match create_prompt_session(
+                                                                        match open_prompt_session(
                                         &cx,
+                                        startup_session.as_deref(),
                                         &cwd,
                                         &surface,
                                         &bus,
                                         &methods,
                                         selected.as_ref(),
                                         None,
+                                        (load_session, resume_session),
                                         additional_directories,
                                         &cfg.additional_directories,
                                     )
                                     .await
                                     {
                                         Ok(Some(sid)) => {
+                                            startup_session = None;
                                             retarget_session(&mut cmd, &sid);
                                             bind_session(
                                                 &mut sessions,
@@ -3037,9 +3183,12 @@ where
                                                     });
                                                 }
                                                 Err(err) => {
+                                                    let method = startup_session
+                                                        .as_deref()
+                                                        .map_or_else(|| "session/new".to_string(), |id| format!("restore {id}"));
                                                     let _ = bus.send(AppEvent::Ctl(
                                                         CtlEvent::Error(format!(
-                                                            "session/new: {err}"
+                                                            "{method}: {err}"
                                                         )),
                                                     ));
                                                 }
@@ -3630,26 +3779,30 @@ where
                                     parked,
                                     session_auth_pending: false,
                                     terminal_method: method_id,
+                                    startup_session,
                                 }));
                             }
                             // A host-owned stream cannot be respawned: retry
                             // session/new in place — the agent may already
                             // accept the freshly written credentials. Whatever
                             // it answers stays visible (#160).
-                                                        match create_prompt_session(
+                                                        match open_prompt_session(
                                 &cx,
+                                startup_session.as_deref(),
                                 &cwd,
                                 &surface,
                                 &bus,
                                 &methods,
                                 selected.as_ref(),
                                 None,
+                                (load_session, resume_session),
                                 additional_directories,
                                 &cfg.additional_directories,
                             )
                             .await
                             {
                                 Ok(Some(sid)) => {
+                                    startup_session = None;
                                     let owner = sid.0.clone();
                                     bind_session(&mut sessions, &mut current, &mut pending, sid);
                                     session_auth_pending = false;
@@ -3728,6 +3881,7 @@ where
                                 ControlFinish::Setup { result, requester } => match result {
                                     Ok((sid, setup, notice)) => {
                                         bind_session(&mut sessions, &mut current, &mut pending, sid.clone());
+                                        startup_session = None;
                                         session_auth_pending = false;
                                         if let Some(previous_id) = requester {
                                             // Held prompts on the session this
@@ -3790,8 +3944,9 @@ where
                                                 additional_directories, &cfg.additional_directories, &control_done_tx);
                                         }
                                         if current.is_none() {
-                                                                                        match create_prompt_session(&cx, &cwd, &surface, &bus, &methods, Some(&method), None, additional_directories, &cfg.additional_directories).await {
+                                                                                        match open_prompt_session(&cx, startup_session.as_deref(), &cwd, &surface, &bus, &methods, Some(&method), None, (load_session, resume_session), additional_directories, &cfg.additional_directories).await {
                                                 Ok(Some(sid)) => {
+                                                    startup_session = None;
                                                     bind_session(&mut sessions, &mut current, &mut pending, sid);
                                                     session_auth_pending = false;
                                                 }

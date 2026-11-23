@@ -717,6 +717,7 @@ async fn run_attach_tcp_connects_and_shuts_down() {
         AcpEndpoint::AttachTcp(client),
         bus_tx,
         cmd_rx,
+        None,
     ));
 
     let (agent, _) = listener.accept().expect("accept");
@@ -842,6 +843,7 @@ async fn run_spawn_fails_fast_when_the_agent_dies() {
         AcpEndpoint::Spawn(vec!["sh".into(), "-c".into(), "sleep 1".into()]),
         bus_tx,
         cmd_rx,
+        None,
     ));
 
     let deadline = std::time::Instant::now() + Duration::from_secs(10);

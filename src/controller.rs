@@ -62,13 +62,14 @@ impl Controller {
         cfg: RuntimeConfig,
         endpoint: crate::acp::AcpEndpoint,
         bus: Sender<AppEvent>,
+        startup_session: Option<String>,
     ) -> Controller {
         let (cmd_tx, cmd_rx) = mpsc::channel::<Cmd>();
         let runtime: Arc<Mutex<Option<Arc<RuntimeProcess>>>> = Arc::new(Mutex::new(None));
         let interrupted = Arc::new(AtomicBool::new(false));
         std::thread::Builder::new()
             .name("dsh-controller".into())
-            .spawn(move || crate::acp::run_blocking(cfg, endpoint, bus, cmd_rx))
+            .spawn(move || crate::acp::run_blocking(cfg, endpoint, bus, cmd_rx, startup_session))
             .expect("spawn acp controller");
         Controller {
             cmd_tx,
