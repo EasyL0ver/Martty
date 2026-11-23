@@ -502,6 +502,15 @@ impl Transcript {
         self.ttft_pending = false;
     }
 
+    /// A bind that confirms the current root (session/load resolving after
+    /// its replay) keeps the replayed open tools and streams, so a live turn
+    /// joined mid-way can still update and settle them.
+    pub fn bind_root_session(&mut self, session: String) {
+        if session != self.root_session {
+            self.set_root_session(session);
+        }
+    }
+
     pub fn clear(&mut self) {
         self.cells.clear();
         self.open_assistant.clear();
@@ -651,16 +660,10 @@ impl Transcript {
         };
         for idx in self.tools.values().copied().collect::<Vec<_>>() {
             if let Some(cell) = self.cells.get_mut(idx) {
-                if let CellKind::Tool {
-                    ok, result, error, ..
-                } = &mut cell.kind
-                {
+                if let CellKind::Tool { ok, error, .. } = &mut cell.kind {
                     if ok.is_none() {
                         *ok = Some(false);
                         *error = Some(text.clone());
-                        if result.is_empty() {
-                            *result = text.clone();
-                        }
                     }
                 }
                 cell.bump();

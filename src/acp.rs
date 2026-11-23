@@ -2425,6 +2425,47 @@ where
                     });
                     return Ok(Handled::Yes);
                 }
+                // copilot-host multiplexing: a turn another client started (or that ended)
+                // drives this tab like its own prompt would, so the tab shows it as running,
+                // queues new prompts behind it and lets Esc cancel it.
+                if msg.method() == "_copilot_host/session_status" {
+                    let params = msg.params();
+                    if let Some(session) = params.get("sessionId").and_then(Value::as_str) {
+                        if params.get("status").and_then(Value::as_str) == Some("running") {
+                            let _ = bus_u.send(AppEvent::Ui(crate::events::UiEvent::TurnStart {
+                                session: session.to_string(),
+                                turn: 0,
+                            }));
+                            let _ = bus_u.send(AppEvent::Rpc {
+                                method: "session.status".into(),
+                                params: json!({"sessionId": session, "status": "running"}),
+                            });
+                        } else {
+                            let kind = params
+                                .get("reason")
+                                .and_then(Value::as_str)
+                                .unwrap_or("completed");
+                            let _ = bus_u.send(AppEvent::Ui(crate::events::UiEvent::TurnEnd {
+                                session: session.to_string(),
+                                kind: kind.to_string(),
+                            }));
+                            let _ = bus_u.send(AppEvent::Rpc {
+                                method: "session.status".into(),
+                                params: json!({"sessionId": session, "status": "idle"}),
+                            });
+                        }
+                    }
+                    return Ok(Handled::Yes);
+                }
+                // copilot-host multiplexing: another client answered the request this tab
+                // shows, or the host resolved it; close the prompt.
+                if msg.method() == "_copilot_host/request_withdrawn" {
+                    let _ = bus_u.send(AppEvent::Rpc {
+                        method: msg.method().into(),
+                        params: msg.params().clone(),
+                    });
+                    return Ok(Handled::Yes);
+                }
                 Ok(Handled::No {
                     message: (msg, cx),
                     retry: false,
@@ -3450,6 +3491,11 @@ where
                                             abort_turn(&cx, &Some(sid), &bus);
                                             handle.turn_aborted = true;
                                         } else {
+                                            // copilot-host multiplexing: the running turn may
+                                            // belong to another client. Cancel it on the agent
+                                            // (a no-op when the session is idle); its end
+                                            // arrives as `_copilot_host/session_status`.
+                                            let _ = cx.send_notification(CancelNotification::new(sid.clone()));
                                             // No live turn, but queued or
                                             // auth-held prompts still pin
                                             // the session: Esc must resolve

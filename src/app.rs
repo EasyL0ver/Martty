@@ -3794,6 +3794,12 @@ impl App {
                 }
             }
             AppEvent::Rpc { method, params } => {
+                if method == "_copilot_host/request_withdrawn" {
+                    if let Some(session) = params.get("sessionId").and_then(serde_json::Value::as_str) {
+                        self.withdraw_asks(session);
+                    }
+                    return;
+                }
                 if method == crate::cordis::AGENTS_NAVIGATE {
                     let protocol = params.get("protocol").and_then(serde_json::Value::as_u64);
                     let action = params.get("action").and_then(serde_json::Value::as_str);
@@ -4696,7 +4702,7 @@ impl App {
                                     let slot = &mut self.parked[pidx];
                                     let old_id = slot.id.clone();
                                     slot.id = session_id.clone();
-                                    slot.transcript.set_root_session(session_id.clone());
+                                    slot.transcript.bind_root_session(session_id.clone());
                                     slot.session_bound = true;
                                     if let Some(notice) = notice {
                                         slot.transcript
@@ -4719,7 +4725,7 @@ impl App {
                                         }
                                         let old_id = self.session_id.clone();
                                         self.session_id = session_id.clone();
-                                        self.transcript.set_root_session(session_id.clone());
+                                        self.transcript.bind_root_session(session_id.clone());
                                         self.session_bound = true;
                                         if let Some(notice) = notice {
                                             self.transcript
@@ -4768,7 +4774,7 @@ impl App {
                             } else if self.session_id == awaiting.id {
                                 let old_id = self.session_id.clone();
                                 self.session_id = session_id.clone();
-                                self.transcript.set_root_session(session_id.clone());
+                                self.transcript.bind_root_session(session_id.clone());
                                 self.session_bound = true;
                                 if let Some(notice) = notice {
                                     self.transcript.push_notice(NoticeLevel::Info, notice);
@@ -4784,7 +4790,7 @@ impl App {
                             {
                                 let old_id = slot.id.clone();
                                 slot.id = session_id.clone();
-                                slot.transcript.set_root_session(session_id.clone());
+                                slot.transcript.bind_root_session(session_id.clone());
                                 slot.session_bound = true;
                                 if let Some(notice) = notice {
                                     slot.transcript.push_notice(NoticeLevel::Info, notice);
@@ -4820,7 +4826,7 @@ impl App {
                             }
                             let old_id = self.session_id.clone();
                             self.session_id = session_id.clone();
-                            self.transcript.set_root_session(session_id.clone());
+                            self.transcript.bind_root_session(session_id.clone());
                             self.session_bound = true;
                             if let Some(notice) = notice {
                                 self.transcript.push_notice(NoticeLevel::Info, notice);
@@ -7112,6 +7118,24 @@ impl App {
             if let Some(tx) = ask.reply.take() {
                 let _ = tx.send(reply);
             }
+        }
+        self.needs_redraw = true;
+    }
+
+    /// copilot-host multiplexing: the session's pending ask was answered by
+    /// another client. Dropping the overlay replies `Cancelled`, which the
+    /// host ignores for a resolved request.
+    fn withdraw_asks(&mut self, session_id: &str) {
+        let live = session_id == self.session_id
+            || self.subagents.iter().any(|v| v.id == session_id);
+        if live {
+            self.permission_ask = None;
+            self.elicitation_ask = None;
+        } else if let Some(slot) = self.parked.iter_mut().find(|slot| {
+            slot.id == session_id || slot.subagents.iter().any(|v| v.id == session_id)
+        }) {
+            slot.permission_ask = None;
+            slot.elicitation_ask = None;
         }
         self.needs_redraw = true;
     }

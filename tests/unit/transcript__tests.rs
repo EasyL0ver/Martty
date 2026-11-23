@@ -275,9 +275,10 @@ fn turn_end_settles_an_orphaned_tool_in_the_client_presentation() {
     });
 
     match &tr.cells[0].kind {
-        CellKind::Tool { ok, error, .. } => {
+        CellKind::Tool { ok, error, result, .. } => {
             assert_eq!(*ok, Some(false));
             assert_eq!(error.as_deref(), Some("interrupted"));
+            assert!(result.is_empty(), "the reason renders once, as the error");
         }
         other => panic!("unexpected cell {other:?}"),
     }
@@ -285,6 +286,27 @@ fn turn_end_settles_an_orphaned_tool_in_the_client_presentation() {
         !tr.streaming(),
         "the stopped turn owns all open presentation state"
     );
+}
+
+#[test]
+fn rebinding_the_same_root_after_replay_keeps_open_tools_settleable() {
+    let mut tr = t("s");
+    tr.apply(UiEvent::ToolCall {
+        session: "s".into(),
+        call_id: "c1".into(),
+        name: "powershell".into(),
+        arguments: "{}".into(),
+    });
+    tr.bind_root_session("s".into());
+    tr.apply(UiEvent::TurnEnd {
+        session: "s".into(),
+        kind: "interrupted".into(),
+    });
+
+    match &tr.cells[0].kind {
+        CellKind::Tool { ok, .. } => assert_eq!(*ok, Some(false)),
+        other => panic!("unexpected cell {other:?}"),
+    }
 }
 
 #[test]
