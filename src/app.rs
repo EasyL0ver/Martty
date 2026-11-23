@@ -6761,6 +6761,10 @@ impl App {
                     && !self.prompt_queue.is_empty()
                 {
                     self.send_queue_head_now(ctl);
+                } else if self.enter_steers() {
+                    // copilot-host: Enter during a running turn steers it (Send
+                    // Now) instead of holding the prompt in the client queue.
+                    self.send_now(ctl);
                 } else {
                     self.submit(ctl);
                 }
@@ -10429,6 +10433,23 @@ impl App {
             };
         }
         self.emit_staged_prompt(staged, None, ctl);
+    }
+
+    /// copilot-host: whether Enter steers the running turn. Only plain text
+    /// typed while a bound session's turn runs and nothing waits in the client
+    /// queue (queued prompts keep their order); commands, shell lines and
+    /// images keep the normal submit path.
+    fn enter_steers(&self) -> bool {
+        let text = self.input.buf();
+        let text = text.trim();
+        self.state == RunState::Running
+            && self.session_bound
+            && !self.prompt_pending
+            && self.queued == 0
+            && self.pending_images.is_empty()
+            && !text.is_empty()
+            && !text.starts_with('/')
+            && !text.starts_with('!')
     }
 
     /// Send-now is ACP steering: issue another prompt immediately while the

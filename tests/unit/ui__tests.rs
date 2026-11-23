@@ -762,6 +762,9 @@ fn meta_row_hints_stay_quiet_while_queue_modals_are_open() {
     let mut app = test_app();
     let (ctl, _commands) = crate::controller::tests::test_controller();
     app.state = RunState::Running;
+    // copilot-host: Enter steers a bound session's running turn; this test
+    // covers the queue path.
+    app.session_bound = false;
     app.input.set("queued draft".into());
     // Plain running state still advertises the interrupt (#148 keeps it).
     assert!(flat(context_hints(&app)).contains("esc interrupt"));

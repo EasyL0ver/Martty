@@ -335,6 +335,9 @@ fn queue_view_contribution_replaces_the_native_fallback_shelf() {
     let (ctl, _commands) = crate::controller::tests::test_controller();
     app.show_banner = false;
     app.state = RunState::Running;
+    // copilot-host: Enter steers a bound session's running turn; this test
+    // covers the queue path.
+    app.session_bound = false;
     app.input.set("plugin-owned-queue-marker".into());
     app.handle(
         AppEvent::Term(crossterm::event::Event::Key(
