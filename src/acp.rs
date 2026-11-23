@@ -1729,6 +1729,11 @@ fn abs_fs_path(path: &str, workspace: &str) -> Option<std::path::PathBuf> {
 /// a fragment or `?` as a query.
 fn unix_file_uri(path: &std::path::Path) -> String {
     let raw = path.to_string_lossy();
+    // golem: Windows paths become `file:///C:/dir/a.png` (or
+    // `file://server/share/a.png`); verbatim `\\?\` prefixes from
+    // `canonicalize` are dropped.
+    #[cfg(windows)]
+    let raw = std::borrow::Cow::<str>::Owned(windows_uri_path(&raw));
     let mut encoded = String::with_capacity(raw.len());
     for byte in raw.as_bytes() {
         match byte {
@@ -1741,6 +1746,23 @@ fn unix_file_uri(path: &std::path::Path) -> String {
         }
     }
     format!("file://{encoded}")
+}
+
+/// A Windows path as the path part of a `file:` URI: forward slashes, a
+/// leading `/` before a drive letter, `//server/share` for UNC paths.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn windows_uri_path(raw: &str) -> String {
+    let raw = if let Some(unc) = raw.strip_prefix(r"\\?\UNC\") {
+        format!(r"\\{unc}")
+    } else {
+        raw.strip_prefix(r"\\?\").unwrap_or(raw).to_string()
+    };
+    let slashed = raw.replace('\\', "/");
+    if slashed.as_bytes().get(1) == Some(&b':') {
+        format!("/{slashed}")
+    } else {
+        slashed
+    }
 }
 
 fn resolve_image_uri(path: &str, workspace: &str) -> Option<String> {
@@ -1763,7 +1785,13 @@ fn spill_image(image: &crate::bus::ImagePart, index: usize) -> Result<String, St
             }
         })
         .collect();
-    let file = dir.join(format!("{}-{}-{}", std::process::id(), index, safe));
+    // golem: a time stamp keeps a later paste from overwriting the file an
+    // earlier prompt still refers to.
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or_default();
+    let file = dir.join(format!("{}-{}-{}-{}", std::process::id(), stamp, index, safe));
     std::fs::write(&file, bytes).map_err(|e| e.to_string())?;
     Ok(file.to_string_lossy().into_owned())
 }

@@ -22,6 +22,7 @@ pub mod vim;
 #[cfg(target_os = "macos")]
 mod macos_mod;
 pub mod normalize;
+pub mod paste_burst;
 
 pub use keymap::{classify, Action, KeyCtx};
 pub use vim::{VimMode, VimState};

@@ -9115,3 +9115,11 @@ async fn edge_paths_combined() {
     let _ = cmd_tx.send(Cmd::Shutdown);
     let _ = client.await;
 }
+
+#[test]
+fn windows_paths_become_file_uri_paths() {
+    assert_eq!(windows_uri_path(r"C:\Users\me\a b.png"), "/C:/Users/me/a b.png");
+    assert_eq!(windows_uri_path(r"\\?\C:\tmp\x.png"), "/C:/tmp/x.png");
+    assert_eq!(windows_uri_path(r"\\?\UNC\srv\share\x.png"), "//srv/share/x.png");
+    assert_eq!(windows_uri_path(r"\\srv\share\x.png"), "//srv/share/x.png");
+}

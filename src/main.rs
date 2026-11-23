@@ -29,6 +29,8 @@ mod slots;
 mod theme;
 mod transcript;
 mod ui;
+#[cfg(windows)]
+mod winclip;
 
 use std::io::Write;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -528,7 +530,41 @@ fn main() -> Result<()> {
                     Ok(false) => continue,
                     Err(_) => break,
                 }
-                match crossterm::event::read() {
+                let read = crossterm::event::read();
+                // golem: Windows consoles deliver a paste as key presses;
+                // read a burst of them whole and hand it over as one paste.
+                #[cfg(windows)]
+                if let Ok(first) = &read {
+                    if crate::input::paste_burst::starts_burst(first) {
+                        let mut burst = vec![first.clone()];
+                        while burst.len() < crate::input::paste_burst::MAX_EVENTS
+                            && matches!(crossterm::event::poll(crate::input::paste_burst::GAP), Ok(true))
+                        {
+                            match crossterm::event::read() {
+                                Ok(ev) => burst.push(ev),
+                                Err(_) => break,
+                            }
+                        }
+                        let mut closed = false;
+                        for ev in crate::input::paste_burst::coalesce(burst) {
+                            let ev = match ev {
+                                crossterm::event::Event::Key(key) => {
+                                    crossterm::event::Event::Key(crate::input::rescue_key(key))
+                                }
+                                ev => ev,
+                            };
+                            if tx.send(AppEvent::Term(ev)).is_err() {
+                                closed = true;
+                                break;
+                            }
+                        }
+                        if closed {
+                            break;
+                        }
+                        continue;
+                    }
+                }
+                match read {
                     Ok(crossterm::event::Event::Key(key)) => {
                         // Recover terminal-lost physical modifiers at read
                         // time, before a quick key release can race the UI

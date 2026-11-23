@@ -960,7 +960,7 @@ pub const KEY_ROWS: &[KeyRow] = &[
         chords_mac: &["ctrl+v"],
         chords_other: &["ctrl+v"],
         ctx: CtxNote::Always,
-        desc_en: "attach the clipboard image",
+        desc_en: "attach the clipboard image (Windows: or paste its text)",
         desc_zh: "粘贴剪贴板图片",
         probes: &[p(KeyCode::Char('v'), CTRL, false)],
     },

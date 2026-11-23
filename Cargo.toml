@@ -29,7 +29,10 @@ agent-client-protocol = { version = "2.0.0", features = ["unstable_auth_methods"
 tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "io-util", "fs", "net", "time", "sync"] }
 tokio-util = { version = "0.7.19", features = ["compat"] }
 futures = "0.3.34"
-image = { version = "0.25", default-features = false, features = ["png"] }
+image = { version = "0.25", default-features = false, features = ["png", "bmp"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_DataExchange", "Win32_System_Memory"] }
 
 [dev-dependencies]
 tokio = { version = "1.53.1", features = ["test-util"] }

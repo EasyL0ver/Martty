@@ -545,6 +545,7 @@ dependencies = [
  "tui-tree-widget",
  "unicode-segmentation",
  "unicode-width",
+ "windows-sys",
 ]
 
 [[package]]

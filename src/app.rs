@@ -454,7 +454,12 @@ fn read_clipboard_image() -> Option<(Vec<u8>, &'static str)> {
     None
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+#[cfg(windows)]
+fn read_clipboard_image() -> Option<(Vec<u8>, &'static str)> {
+    crate::winclip::read_image_png().map(|png| (png, "image/png"))
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
 fn read_clipboard_image() -> Option<(Vec<u8>, &'static str)> {
     None
 }
@@ -5159,17 +5164,7 @@ impl App {
                     }
                     return;
                 }
-                self.slash_completion_dismissed = false;
-                // The composer is multi-line (soft wrap, ctrl+j), so pasted
-                // text keeps its line structure instead of being flattened
-                // to spaces (issue #54). `TextArea::insert_str` understands
-                // both `\n` and `\r\n`; normalize stray CR-only line
-                // endings some terminals (iTerm2 et al.) send.
-                let text = text.replace("\r\n", "\n").replace('\r', "\n");
-                self.input.insert_str(&text);
-                self.input_sel = None;
-                self.reconcile_attachments();
-                self.needs_redraw = true;
+                self.paste_into_composer(&text);
             }
             _ => {}
         }
@@ -5189,6 +5184,21 @@ impl App {
                     id: view.id,
                     event: "cancel".into(),
                     value: None,
+    /// Insert pasted text into the composer.
+    fn paste_into_composer(&mut self, text: &str) {
+        self.slash_completion_dismissed = false;
+        // The composer is multi-line (soft wrap, ctrl+j), so pasted
+        // text keeps its line structure instead of being flattened
+        // to spaces (issue #54). `TextArea::insert_str` understands
+        // both `\n` and `\r\n`; normalize stray CR-only line
+        // endings some terminals (iTerm2 et al.) send.
+        let text = text.replace("\r\n", "\n").replace('\r', "\n");
+        self.input.insert_str(&text);
+        self.input_sel = None;
+        self.reconcile_attachments();
+        self.needs_redraw = true;
+    }
+
                 });
             } else {
                 self.view_overlay = Some(view);
@@ -10306,7 +10316,27 @@ impl App {
             self.input.set(caption);
             self.input.insert_char(' ');
         } else if self.input.cursor_char() > 0
+    /// golem: on Windows, ctrl+v (empty caption) pastes clipboard text
+    /// when there is no picture: console terminals deliver neither
+    /// images nor bracketed pastes to the app.
             && !self
+        #[cfg(windows)]
+        if caption.is_empty() {
+            if let Some(png) = crate::winclip::read_image_png() {
+                self.stage_image(
+                    "clipboard.png".into(),
+                    "clipboard".into(),
+                    "image/png".into(),
+                    png,
+                    String::new(),
+                );
+            } else if let Some(text) = crate::winclip::read_text().filter(|t| !t.is_empty()) {
+                self.paste_into_composer(&text);
+            } else {
+                self.show_tip(self.locale.tr("clipboard is empty", "剪贴板为空"));
+            }
+            return;
+        }
                 .input
                 .buf()
                 .chars()

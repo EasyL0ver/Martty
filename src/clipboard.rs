@@ -38,6 +38,12 @@ fn is_remote() -> bool {
         .any(|k| std::env::var_os(k).is_some())
 }
 
+#[cfg(windows)]
+fn native_copy(text: &str) -> bool {
+    crate::winclip::write_text(text)
+}
+
+#[cfg(not(windows))]
 fn native_copy(text: &str) -> bool {
     if cfg!(target_os = "macos") {
         return pipe_cmd("pbcopy", &[], text);
