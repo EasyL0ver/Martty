@@ -201,7 +201,7 @@ pub const SLASH_COMMANDS: &[SlashCommand] = &[
     SlashCommand {
         name: "liang",
         usage: "/liang [on|off]",
-        desc: "召唤小难梁 — 🤫 idle · ⌨︎ working",
+        desc: "show or hide the Liang pet — 🤫 idle · ⌨︎ working",
     },
     SlashCommand {
         name: "model",
@@ -8985,9 +8985,15 @@ impl App {
                     _ => !self.pet_visible,
                 };
                 let msg = if self.pet_visible {
-                    "🤫 小难梁已召唤 — 安静，他在想 AGI · /liang 收回"
+                    self.locale.tr(
+                        "🤫 Liang is here — quiet, he is thinking about AGI · /liang hides him",
+                        "🤫 小难梁已召唤 — 安静，他在想 AGI · /liang 收回",
+                    )
                 } else {
-                    "小难梁去隆基市场买卡了 — /liang 再次召唤"
+                    self.locale.tr(
+                        "Liang went out to buy GPUs — /liang brings him back",
+                        "小难梁去隆基市场买卡了 — /liang 再次召唤",
+                    )
                 };
                 self.show_tip(msg);
             }

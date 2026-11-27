@@ -13,6 +13,19 @@ fn every_builtin_command_has_an_explicit_zh_desc() {
 }
 
 #[test]
+fn english_builtin_command_descs_have_no_cjk() {
+    let cjk = |c: char| ('\u{3000}'..='\u{9fff}').contains(&c) || ('\u{ff00}'..='\u{ffef}').contains(&c);
+    for command in crate::app::SLASH_COMMANDS {
+        let en = Locale::En.command_desc(command.name, command.desc);
+        assert!(
+            !en.chars().any(cjk) && !command.usage.chars().any(cjk),
+            "builtin /{} shows Chinese in the English slash menu: {en}",
+            command.name
+        );
+    }
+}
+
+#[test]
 fn builtin_slash_commands_are_sorted_by_name() {
     let names: Vec<&str> = crate::app::SLASH_COMMANDS
         .iter()
